@@ -1,0 +1,588 @@
+#ifndef CONSOLE_H
+#define CONSOLE_H
+#include <WiFi.h>
+#include "sensors_data.h"
+#include "control.h"
+#include "data_logger.h"
+#include "event_log.h"
+#include "msk_link.h"
+#include <LittleFS.h>
+#define FIRMWARE_VERSION "v.2.0-GL"
+#define OUTPUT_FREQUENCE 1500
+
+extern String useWiFi;
+extern String ssid;
+extern String password;
+String callSign = "MYSAT";
+static uint32_t frameCounter = 0;
+extern bool debug_mode_active;
+enum TelemetryMode { text,
+                     plotter,
+                     debug };
+TelemetryMode currentMode = text;
+
+enum PlotterMode { environment,
+                   position,
+                   sunTracker,
+                   powerSystem };
+PlotterMode plotterMode = environment;
+
+void setWiFi();
+void tryConnectWiFi();
+
+// Radio console extensions (RadioMode / RadioStatus / RadioChannel / ...).
+// Defined in msk_radio.h, which is included after this file.
+bool mskConsoleCommand(const String& in);
+bool radioConsoleAllowed();
+
+void selectPlotterMode() {
+  Serial.println("Select plotter mode:");
+  Serial.println("1 - Environment (BME680)");
+  Serial.println("2 - Position (MPU****)");
+  Serial.println("3 - Sun Tracker (ADS1015)");
+  Serial.println("4 - Power System (INA3221)");
+
+  while (!Serial.available()) {}
+  int selection = Serial.parseInt();
+
+  if (selection >= 1 && selection <= 4) {
+    plotterMode = (PlotterMode)(selection - 1);
+    Serial.print("Selected mode: ");
+    Serial.println(selection);
+  } else {
+    LOG_WARN("[CONSOLE] Invalid selection. Keeping current mode.");
+  }
+}
+
+void saveCallSign(const String& callSign) {
+  File file = LittleFS.open("/callsign.txt", "w");
+  if (file) {
+    file.println(callSign);
+    file.close();
+  }
+}
+
+void loadCallSign(String& callSign) {
+  File file = LittleFS.open("/callsign.txt", "r");
+  if (file) {
+    callSign = file.readStringUntil('\n');
+    callSign.trim();
+    file.close();
+  }
+}
+
+void setCallSign() {
+  Serial.print("Enter the Satellite call sign: ");
+  while (!Serial.available()) {}
+  callSign = Serial.readStringUntil('\n');
+  callSign.trim();
+  Serial.println(callSign);
+  saveCallSign(callSign);
+
+  if (callSign.length() == 0) {
+    callSign = "MYSAT";
+  }
+}
+
+void reactToCommand(String str) {
+  Serial.println("\n\n  ▓");
+  Serial.println("  ▓" + str);
+  Serial.println("  ▓\n\n");
+  delay(2000);
+}
+
+bool output = true;
+void turnConsole() {
+  output = !output;
+}
+
+void auditFileSystem() {
+  Serial.println("\n======= FILE SYSTEM AUDIT (LittleFS) =======");
+
+  size_t total = LittleFS.totalBytes();
+  size_t used = LittleFS.usedBytes();
+  float usagePercent = (float)used / total * 100.0;
+
+  Serial.printf("TOTAL CAPACITY: %u bytes (%.2f KB)\n", total, total / 1024.0);
+  Serial.printf("USED SPACE:     %u bytes (%.2f KB) [%.1f%%]\n", used, used / 1024.0, usagePercent);
+  Serial.printf("FREE SPACE:     %u bytes (%.2f KB)\n", total - used, (total - used) / 1024.0);
+  Serial.println("--------------------------------------------------");
+
+  File root = LittleFS.open("/");
+  if (!root || !root.isDirectory()) {
+    LOG_ERROR("[FS] Failed to open root directory!");
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    if (file.isDirectory()) {
+      Serial.printf("[DIR]  /%s\n", file.name());
+      int allDirSize = 0;
+
+      File subDir = LittleFS.open(file.name());
+      File subFile = subDir.openNextFile();
+      while (subFile) {
+        Serial.printf("      |-- %-20s | %u bytes\n", subFile.name(), subFile.size());
+        allDirSize += subFile.size();
+        subFile = subDir.openNextFile();
+      }
+      Serial.printf("Total Directory Size: %u bytes\n", allDirSize);
+    } else {
+      Serial.printf("[FILE] /%-20s | %u bytes\n", file.name(), file.size());
+    }
+    file = root.openNextFile();
+  }
+  Serial.println("==================================================\n");
+}
+
+void printConsoleHelp() {
+  Serial.println("\n===== MYSAT CONSOLE (" FIRMWARE_VERSION " / " MSK_VERSION ") =====");
+  Serial.println(" Platform");
+  Serial.println("   SolarDeploy | SolarRetract | SolarMove   deploy/retract solar panels");
+  Serial.println("   TurnLed | BlinkLed                       STAR LED");
+  Serial.println("   Calibrate                                zero the MPU gyro");
+  Serial.println("   ChangeTime | SetCallSign                 RTC / satellite callsign");
+  Serial.println(" Payload");
+  Serial.println("   Snap                                     take a photo into the ring buffer");
+  Serial.println("   Downlink <id>                            transmit a stored photo over the radio");
+  Serial.println(" Data");
+  Serial.println("   StartLogging | StopLogging | ListLogFiles | DeleteLogging");
+  Serial.println("   SendEventLog | AuditFileSystem");
+  Serial.println(" Telemetry");
+  Serial.println("   SwitchTelemetry | SelectPlotterMode | TurnConsole");
+  Serial.println("   DebugModeOn | DebugModeOff");
+  Serial.println(" Radio");
+  Serial.println("   RadioMode OFF|BEACON|STREAM|FULL         what goes out over the air");
+  Serial.println("   RadioStatus                              link + controller state");
+  Serial.println("   RadioChannel <1..100>                    HC-12 channel (via the RCU)");
+  Serial.println("   RadioPower <1..8>                        HC-12 TX power (-1..+20 dBm)");
+  Serial.println("   RadioFU <1..4>                           HC-12 FU mode");
+  Serial.println("   RadioReset                               power-cycle the HC-12");
+  Serial.println("   SetRadio                                 legacy HC-12 AT passthrough");
+  Serial.println(" Network");
+  Serial.println("   SetWIFI                                  Wi-Fi credentials / Web GUI");
+  Serial.println("=========================================================\n");
+}
+
+// One complete console line, already stripped of its terminator.
+// Serial is drained by radioSerialTask() in msk_radio.h, which splits MSK
+// frames from human console text and calls this for the latter.
+void handleConsoleLine(String inputBuffer) {
+      inputBuffer.trim();
+
+      bool recognized = false;
+
+      if (inputBuffer.equalsIgnoreCase("ChangeTime")) {
+        readUARTTime();
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SetWIFI")) {
+        setWiFi();
+        if (useWiFi.equalsIgnoreCase("Yes")) {
+          tryConnectWiFi();
+          initServer();
+        }
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("TurnLed")) {
+        light_on();
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SolarDeploy")) {
+        setStateMotor(true);
+        reactToCommand("Deploying Solar Panels...");
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SolarRetract")) {
+        setStateMotor(false);
+        reactToCommand("Retracting Solar Panels...");
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SolarMove")) {
+        setStateMotor(!stateMotor);
+        reactToCommand("Moving Solar Panels...");
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("Calibrate")) {
+        calibrateMPU();
+        pauseToRead();
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("TurnConsole")) {
+        reactToCommand("Turning Console...");
+        turnConsole();
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SetCallSign")) {
+        setCallSign();
+        loadCallSign(callSign);
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SwitchTelemetry")) {
+        if (currentMode == text) {
+          currentMode = plotter;
+          reactToCommand("Mode: PLOTTER.");
+          selectPlotterMode();
+
+        } else if (currentMode == plotter) {
+          currentMode = text;
+          reactToCommand("Mode: TEXT.");
+        }
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SelectPlotterMode")) {
+        if (currentMode == plotter) {
+          selectPlotterMode();
+        } else {
+          Serial.println("Switch to plotter mode first (SwitchTelemetry)");
+        }
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("DebugModeOn")) {
+        currentMode = debug;
+        debug_mode_active = true;
+        reactToCommand("Mode: DEBUG.");
+        if (useWiFi.equalsIgnoreCase("Yes") && WiFi.status() == WL_CONNECTED) {
+          Serial.print("[DEBUG] Server IP: ");
+          Serial.println(WiFi.localIP());
+        } else {
+          Serial.println("[DEBUG] WiFi not connected.");
+        }
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("DebugModeOff")) {
+        debug_mode_active = false;
+        currentMode = text;
+        reactToCommand("Mode: TEXT.");
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SetRadio")) {
+        setRadio();
+        reactToCommand("Radio(HC-12) AT-config mode activated.");
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("StartLogging")) {
+        startLogging();
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("StopLogging")) {
+        stopLogging();
+        reactToCommand("Stop logging...");
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("AuditFileSystem")) {
+        auditFileSystem();
+        pauseToRead();
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("ListLogFiles")) {
+        listLogFiles();
+        pauseToRead();
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("BlinkLed")) {
+        startBlink(stateLight);
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("SendEventLog")) {
+        sendEventLogToSerial();
+        pauseToRead();
+        recognized = true;
+
+      } else if(inputBuffer.equalsIgnoreCase("DeleteLogging")){
+        deleteMissionLogs();
+        pauseToRead();
+        recognized = true;
+
+      } else if (inputBuffer.equalsIgnoreCase("Help")) {
+        printConsoleHelp();
+        recognized = true;
+      }
+
+      // Radio commands live in msk_radio.h so they can reach the RCU driver.
+      if (!recognized && mskConsoleCommand(inputBuffer)) recognized = true;
+
+      if (recognized) {
+        writeEventLog("COMMAND_RECEIVED \"" + inputBuffer + "\"");
+      }
+
+      if (inputBuffer.length() >= 3 && !recognized) {
+        reactToCommand("! Command unrecognized.");
+      }
+}
+
+void outputDataText(pointer_of_sensors* data_) {
+  Serial.println("\n\n\n" + callSign + "(" FIRMWARE_VERSION ")");
+  Serial.println("  Frame: " + String(frameCounter));
+
+  if (init_status.bme_) {
+    if (data_->bme_->data_available) {
+      Serial.println("===ENVIRONMENT:==================");
+
+      Serial.print("  Temp = ");
+      Serial.print(data_->bme_->temperature);
+      Serial.print(F(" *C"));
+      Serial.print("   \t| Gas res. = ");
+      Serial.print(data_->bme_->gas_resistance);
+      Serial.println(" KOhms");
+
+      Serial.print("  Pres = ");
+      Serial.print(data_->bme_->pressure);
+      Serial.print(" hPa");
+      Serial.print(" \t| IAQ = ");
+      Serial.print(data_->bme_->iaq);
+      switch (data_->bme_->iaq_accuracy) {
+        case 0: Serial.println(" (low)"); break;
+        case 1: Serial.println(" (medium)"); break;
+        case 2: Serial.println(" (high)"); break;
+        case 3: Serial.println(" (verified)"); break;
+        default: Serial.println(" (?)"); break;
+      }
+
+    } else {
+      Serial.println("===ENVIRONMENT:==================");
+      Serial.println(" IAQ Sensor Warming Up (5 min)...");
+    }
+
+  } else {
+    Serial.println("▲ BME680 (environmental sensor) not found!");
+  }
+
+  if (init_status.mpu_) {
+    Serial.println("===POSITION:=====================");
+    if (!calibration.valid) {
+      Serial.println("MPU**** is not calibrated.");
+    } else {
+
+      int roll = round(data_->mpu_->roll - offset_roll);
+      int pitch = round(data_->mpu_->pitch - offset_pitch);
+      int yaw = round(data_->mpu_->yaw - offset_yaw);
+
+      Serial.printf("  x = %s%d   deg\n", (roll > 0 ? "+" : ""), roll);
+      Serial.printf("  y = %s%d   deg\n", (pitch > 0 ? "+" : ""), pitch);
+      Serial.printf("  z = %s%d   deg\n", (yaw > 0 ? "+" : ""), yaw);
+    }
+  } else {
+    Serial.println("▲ MPU**** module (position sensor) not found!");
+  }
+
+  if (init_status.ads_) {
+    Serial.println("===SUN TRACKER:==================");
+    Serial.print("  ph1 (left) = ");
+    Serial.print(data_->ads_->ph1);
+    Serial.print("   |  ph2 (back) = ");
+    Serial.println(data_->ads_->ph2);
+
+    Serial.print("  ph3 (right) = ");
+    Serial.print(data_->ads_->ph3);
+    Serial.print("  |  ph4 (front) = ");
+    Serial.println(data_->ads_->ph4);
+  } else {
+    Serial.println("▲ ADS1015 module (analog-to-digital convertor) not found!");
+  }
+
+  if (init_status.ina_) {
+    float IL = data_->ina_->leftSolarPanelCurrent;
+    float IR = data_->ina_->rightSolarPanelCurrent;
+    if (IL < 0) IL = 0;
+    if (IR < 0) IR = 0;
+
+    Serial.println("===POWER SYSTEM:==================");
+    Serial.print("  Battery:      U = ");
+    Serial.print(data_->ina_->batteryVoltage, 2);
+    Serial.print("  V,  I =  ");
+    Serial.print(data_->ina_->batteryCurrent, 2);
+    Serial.println(" mA");
+
+    Serial.print("  Solar Panels: U = ");
+    Serial.print(data_->ina_->SolarPanelVoltage, 2);
+    Serial.print("  V,");
+
+    if (IL + IR > 5) {
+      Serial.print("  I_L = ");
+      Serial.print(IL, 2);
+      Serial.print(" mA,  I_R = ");
+      Serial.print(IR, 2);
+      Serial.println(" mA");
+    } else {
+      Serial.println("  I =  low ");
+    }
+  } else {
+    Serial.println("▲ INA3221 module (triple-channel current and voltage sensore) not found!");
+  }
+
+  if (init_status.rtc_) {
+    Serial.println("================================");
+    Serial.print("  Time: ");
+    Serial.print(data_->rtc_->year_);
+    Serial.print(".");
+    if (data_->rtc_->month_ < 10) {
+      Serial.print(0);
+      Serial.print(data_->rtc_->month_);
+    } else {
+      Serial.print(data_->rtc_->month_);
+    }
+    Serial.print(".");
+    if (data_->rtc_->day_ < 10) {
+      Serial.print(0);
+      Serial.print(data_->rtc_->day_);
+    } else {
+      Serial.print(data_->rtc_->day_);
+    }
+    Serial.print("  ");
+    if (data_->rtc_->hour_ < 10) {
+      Serial.print(0);
+      Serial.print(data_->rtc_->hour_);
+    } else {
+      Serial.print(data_->rtc_->hour_);
+    }
+    Serial.print(":");
+    if (data_->rtc_->minute_ < 10) {
+      Serial.print(0);
+      Serial.print(data_->rtc_->minute_);
+    } else {
+      Serial.print(data_->rtc_->minute_);
+    }
+    Serial.print(":");
+    if (data_->rtc_->second_ < 10) {
+      Serial.print(0);
+      Serial.println(data_->rtc_->second_);
+    } else {
+      Serial.println(data_->rtc_->second_);
+    }
+  } else {
+    Serial.println("▲ DS3231 module (real time clock) not found!");
+  }
+
+  Serial.print(stateMotor ? "  Solar panels: Deployed" : "  Solar panels: Retracted");
+  Serial.print("  |  ");
+  Serial.print("StarLED: ");
+  Serial.println(stateLight ? "ON" : "OFF");
+
+  if (logger.total_rows >= MAX_TOTAL_ROWS && logger.total_rows > 0) {
+    Serial.println("  Mission data logging: STOPPED (memory full)");
+  } else if (logger.enabled) {
+    Serial.print("  Mission data logging: ACTIVE (period: ");
+    Serial.print(logger.period_seconds);
+    Serial.print(" s, rows: ");
+    Serial.print(logger.total_rows);
+    Serial.print("/");
+    Serial.print(MAX_TOTAL_ROWS);
+    Serial.println(")");
+  }
+
+  Serial.println("================================");
+  if (!LittleFS.exists("/bootstrap.css")) {
+    Serial.println("  ▲ Files for Web-GUI not found!");
+  } else if (useWiFi.equalsIgnoreCase("Yes")) {
+    Serial.print("  CONNECT VIA WIFI “"); 
+    Serial.print(ssid); 
+    Serial.println("”:");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("  WiFi not configured. Use the command: SetWIFI");
+  }
+  Serial.println("================================");
+}
+
+void outputDataPlotter(pointer_of_sensors* data_) {
+  switch (plotterMode) {
+    case environment:
+      if (init_status.bme_) {
+        Serial.print("Temperature:");
+        Serial.print(data_->bme_->temperature);
+        Serial.print(',');
+        Serial.print("Pressure:");
+        Serial.print(data_->bme_->pressure);
+        Serial.print(',');
+        Serial.print("Humidity:");
+        Serial.print(data_->bme_->humidity);
+        Serial.print(',');
+        Serial.print("GasResistance:");
+        Serial.print(data_->bme_->gas_resistance);
+      }
+      break;
+
+    case position:
+      if (init_status.mpu_ && calibration.valid) {
+        int roll = round(data_->mpu_->roll - offset_roll);
+        int pitch = round(data_->mpu_->pitch - offset_pitch);
+        int yaw = round(data_->mpu_->yaw - offset_yaw);
+
+        Serial.print("X:");
+        Serial.print(roll);
+        Serial.print(',');
+        Serial.print("Y:");
+        Serial.print(pitch);
+        Serial.print(',');
+        Serial.print("Z:");
+        Serial.print(yaw);
+      }
+      break;
+
+    case sunTracker:
+      if (init_status.ads_) {
+        Serial.print("ph1:");
+        Serial.print(data_->ads_->ph1);
+        Serial.print(',');
+        Serial.print("ph2:");
+        Serial.print(data_->ads_->ph2);
+        Serial.print(',');
+        Serial.print("ph3:");
+        Serial.print(data_->ads_->ph3);
+        Serial.print(',');
+        Serial.print("ph4:");
+        Serial.print(data_->ads_->ph4);
+      }
+      break;
+
+    case powerSystem:
+      if (init_status.ina_) {
+        float IL = data_->ina_->leftSolarPanelCurrent;
+        float IR = data_->ina_->rightSolarPanelCurrent;
+        if (IL < 0) IL = 0;
+        if (IR < 0) IR = 0;
+
+        Serial.print("BattV:");
+        Serial.print(data_->ina_->batteryVoltage, 2);
+        Serial.print(',');
+        Serial.print("BattI:");
+        Serial.print(data_->ina_->batteryCurrent, 2);
+        Serial.print(',');
+        Serial.print("SolarV:");
+        Serial.print(data_->ina_->SolarPanelVoltage, 2);
+        Serial.print(',');
+        Serial.print("SolarI_L:");
+        Serial.print(IL, 2);
+        Serial.print(',');
+        Serial.print("SolarI_R:");
+        Serial.print(IR, 2);
+      }
+      break;
+  }
+  Serial.println();
+}
+
+unsigned long lastOutput = 0;
+void outputData(pointer_of_sensors* data_) {
+  unsigned long now = millis();
+
+  if (now - lastOutput >= OUTPUT_FREQUENCE && output) {
+    frameCounter++;
+    // In RADIO_STREAM the wire carries MSK frames only, so the human-readable
+    // dump is suppressed - the frame counter keeps advancing either way.
+    if (radioConsoleAllowed()) {
+      if (currentMode == text) {
+        outputDataText(data_);
+      } else if (currentMode == plotter) {
+        outputDataPlotter(data_);
+      }
+    }
+    lastOutput = now;
+  }
+
+  handleDataLogging(data_);
+}
+
+#endif

@@ -1,0 +1,22 @@
+# Captured flight data - real telemetry and camera images from the operator's
+# own satellite. Regenerated on first run; not useful to anyone else.
+earthstation/groundlink_data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Arduino / build output
+build/
+*.bin
+*.elf
+*.map
+*.hex
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,108 @@
+//for DS3231 - Real Time Clock (RTC) on MySat
+
+//used to control the actual time during power off of the main microcontroller
+#ifndef RTC_H
+#define RTC_H
+
+#include <RtcDS3231.h>
+#include <Wire.h>
+RtcDS3231<TwoWire> Rtc(Wire);
+
+struct rtc_struct {
+  int year_;
+  int month_; 
+  int day_;
+  int hour_;
+  int minute_;
+  int second_;
+} rtc_data;
+
+bool initRTC() {         //Initializes the DS3231 Real Time Clock (RTC) module; used in the file "sensors_data.h"
+  Rtc.Begin();
+  return Rtc.GetIsRunning();
+}
+
+void setRTC(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second) { //Sets the date and time on the RTC
+  RtcDateTime dt(year, month, day, hour, minute, second);
+  Rtc.SetDateTime(dt);
+}
+
+void pauseToRead() {
+  int retry = 0;
+  while (retry < 6) {
+    delay(500);
+    Serial.print(".");
+    retry++;
+  }
+  Serial.println();
+}
+
+void readUARTTime() {                   //Read date and time data from the user
+  Serial.println("Please set time. Enter data only in numbers!");
+
+  uint16_t year;
+  uint8_t month, day, hour, minute, second;
+
+  Serial.print("Enter year:");
+  while (!Serial.available()) {}
+  year = Serial.readStringUntil('\n').toInt();
+  Serial.println(year);
+
+  Serial.print("Enter month:");
+  while (!Serial.available()) {}
+  month = Serial.readStringUntil('\n').toInt();
+  Serial.println(month);
+
+  Serial.print("Enter day:");
+  while (!Serial.available()) {}
+  day = Serial.readStringUntil('\n').toInt();
+  Serial.println(day);
+
+  Serial.print("Enter hour:");
+  while (!Serial.available()) {}
+  hour = Serial.readStringUntil('\n').toInt();
+  Serial.println(hour);
+
+  Serial.print("Enter minute:");
+  while (!Serial.available()) {}
+  minute = Serial.readStringUntil('\n').toInt();
+  Serial.println(minute);
+
+  Serial.print("Enter second:");
+  while (!Serial.available()) {}
+  second = Serial.readStringUntil('\n').toInt();
+  Serial.println(second);
+
+  if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+    LOG_WARN("[RTC] Invalid input! Please try again.");
+    return;
+  }
+
+  setRTC(year, month, day, hour, minute, second);
+  LOG_INFO("[RTC] Time is now set!");
+  pauseToRead();
+}
+
+void setTime() {            //Called during the setup() function
+  RtcDateTime now = Rtc.GetDateTime(); 
+
+  if (!now.IsValid()) {
+    LOG_WARN("[RTC] Time is invalid. Please set time.");
+    readUARTTime();
+  } else {
+    //Serial.println("If you want to change the time, use the command: ChangeTime ");
+  }
+}
+
+rtc_struct* get_rtc() {
+  RtcDateTime dt = Rtc.GetDateTime();
+  rtc_data.year_ = dt.Year();
+  rtc_data.month_ = dt.Month();
+  rtc_data.day_ = dt.Day();
+  rtc_data.hour_ = dt.Hour();
+  rtc_data.minute_ = dt.Minute();
+  rtc_data.second_ = dt.Second();
+  return &rtc_data;
+}
+
+#endif
